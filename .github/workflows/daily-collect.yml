@@ -1,12 +1,17 @@
 name: daily-collect
 
-# Runs every day at 09:30 UTC (after US close the prior day is settled).
-# GitHub gives public repos unlimited Actions minutes; private repos get
-# 2,000 free minutes/month — this job takes ~2–4 min, so well within free.
+# Full run every day at 09:30 UTC. Can also be triggered manually —
+# or by the app's "Add ticker" button — with an optional single ticker,
+# which collects only that one (~40s) instead of the whole universe.
 on:
   schedule:
     - cron: "30 9 * * *"
-  workflow_dispatch: {}   # lets you trigger it manually from the Actions tab
+  workflow_dispatch:
+    inputs:
+      ticker:
+        description: "Collect a single ticker only (leave empty for a full run)"
+        required: false
+        default: ""
 
 jobs:
   collect:
@@ -26,4 +31,5 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           SEC_UA: ${{ secrets.SEC_UA }}
+          TICKER: ${{ github.event.inputs.ticker }}
         run: python collector/collector.py
