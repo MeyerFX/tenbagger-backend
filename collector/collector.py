@@ -425,7 +425,20 @@ def collect_insiders(conn, ticker):
 def main():
     conn = db()
     print("== tenbagger collector ==")
-    universe = load_universe(conn)
+    single = (os.environ.get("TICKER") or "").strip().upper()
+    if single:
+        # on-demand mode: collect just one ticker (triggered from the app)
+        print(f"  single-ticker mode: {single}")
+        with conn.cursor() as cur:
+            cur.execute(
+                "insert into watchlist (ticker, active) values (%s, true) "
+                "on conflict (ticker) do update set active = true",
+                (single,),
+            )
+        conn.commit()
+        universe = [(single, None, None)]
+    else:
+        universe = load_universe(conn)
     print(f"  universe: {len(universe)} tickers")
     for ticker, currency, kind in universe:
         try:
