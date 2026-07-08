@@ -54,6 +54,12 @@ UNIVERSE = [
     ("PETR4.SA", "BRL", None),   # Petrobras — Brazil/BRL path
     ("VALE3.SA", "BRL", None),
     ("ITUB4.SA", "BRL", None),
+    ("SIVE.ST", "SEK", None),
+    ("AAOI",    "USD", None),
+    ("ACHR",    "USD", None),
+    ("SNDK",    "USD", None),
+    ("GGAL",    "USD", None),
+    ("SNTI",    "USD", None),
 ]
 
 SECTOR_FALLBACK_PE = {  # rough industry medians, used when peers are thin
