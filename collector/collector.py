@@ -102,7 +102,18 @@ def db():
 
 
 def load_universe(conn):
-    """Read tickers from the watchlist table; seed it from UNIVERSE on first run."""
+    """Universe = union of every user's watchlist (multi-user mode).
+    Falls back to the legacy global watchlist while migrating."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute("select distinct ticker from user_watchlists")
+            rows = [r[0] for r in cur.fetchall()]
+        if rows:
+            return [(t, None, None) for t in sorted(rows)]
+        print("  user_watchlists empty — falling back to legacy watchlist")
+    except Exception as e:
+        conn.rollback()
+        print(f"  user_watchlists missing ({e}) — falling back to legacy watchlist")
     try:
         with conn.cursor() as cur:
             cur.execute("select ticker, currency, kind from watchlist where active order by ticker")
@@ -428,14 +439,7 @@ def main():
     single = (os.environ.get("TICKER") or "").strip().upper()
     if single:
         # on-demand mode: collect just one ticker (triggered from the app)
-        print(f"  single-ticker mode: {single}")
-        with conn.cursor() as cur:
-            cur.execute(
-                "insert into watchlist (ticker, active) values (%s, true) "
-                "on conflict (ticker) do update set active = true",
-                (single,),
-            )
-        conn.commit()
+        print(f"  single-ticker mode: {single} (cache only — user adds to watchlist in the app)")
         universe = [(single, None, None)]
     else:
         universe = load_universe(conn)
