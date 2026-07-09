@@ -101,16 +101,19 @@ def db():
     return psycopg2.connect(url)
 
 
+MAG7 = ["AAPL", "MSFT", "NVDA", "GOOGL", "AMZN", "META", "TSLA"]  # public showcase, always collected
+
+
 def load_universe(conn):
-    """Universe = union of every user's watchlist (multi-user mode).
+    """Universe = Mag-7 showcase + union of every user's watchlist.
     Falls back to the legacy global watchlist while migrating."""
     try:
         with conn.cursor() as cur:
             cur.execute("select distinct ticker from user_watchlists")
             rows = [r[0] for r in cur.fetchall()]
         if rows:
-            return [(t, None, None) for t in sorted(rows)]
-        print("  user_watchlists empty — falling back to legacy watchlist")
+            return [(t, None, None) for t in sorted(set(rows) | set(MAG7))]
+        print("  user_watchlists empty — falling back to legacy watchlist (+ Mag 7)")
     except Exception as e:
         conn.rollback()
         print(f"  user_watchlists missing ({e}) — falling back to legacy watchlist")
@@ -119,7 +122,8 @@ def load_universe(conn):
             cur.execute("select ticker, currency, kind from watchlist where active order by ticker")
             rows = cur.fetchall()
         if rows:
-            return [(t, c, k) for (t, c, k) in rows]
+            have = {t for (t, _, _) in rows}
+            return [(t, c, k) for (t, c, k) in rows] + [(t, None, None) for t in MAG7 if t not in have]
     except Exception as e:
         conn.rollback()
         print(f"  watchlist table missing? ({e}) — run db/watchlist.sql. Using built-in seed.")
