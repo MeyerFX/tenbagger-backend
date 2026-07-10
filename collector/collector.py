@@ -338,9 +338,20 @@ def upsert_instrument(conn, row):
 
 
 def collect_prices(conn, tk, ticker, px_scale=1.0, years=5):
-    hist = tk.history(period=f"{years}y", interval="1d", auto_adjust=True)
+    hist = None
+    for attempt in (1, 2, 3):
+        try:
+            hist = tk.history(period=f"{years}y", interval="1d", auto_adjust=True)
+        except Exception as e:
+            print(f"  history fetch error (try {attempt}): {e}")
+            hist = None
+        if hist is not None and not hist.empty:
+            break
+        if attempt < 3:
+            print(f"  empty history (try {attempt}) — Yahoo throttling? retrying in 15s")
+            time.sleep(15)
     if hist is None or hist.empty:
-        print("  no price history")
+        print("  no price history after retries — keeping previous prices in DB")
         return
     rows = []
     for idx, r in hist.iterrows():
@@ -451,7 +462,7 @@ def main():
     for ticker, currency, kind in universe:
         try:
             collect_instrument(conn, ticker, currency, kind)
-            time.sleep(1.0)  # gentle pacing for Yahoo
+            time.sleep(2.5)  # gentle pacing for Yahoo (CI runners get throttled)
         except Exception as e:
             print(f"!! {ticker} failed: {e}")
             conn.rollback()
