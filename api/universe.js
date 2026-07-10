@@ -79,7 +79,7 @@ export default async function handler(req, res) {
     const fx = Object.fromEntries(fxRows.map((f) => [f.currency, Number(f.per_usd)]));
     const stocks = instruments.map((r) => toStock(r, fx));
 
-    res.setHeader("Cache-Control", "s-maxage=3600, stale-while-revalidate"); // cache 1h on the edge
+    res.setHeader("Cache-Control", "s-maxage=120, stale-while-revalidate=60"); // short cache so new tickers show up fast
     res.setHeader("Content-Type", "application/json");
     res.status(200).json({ updatedAt: new Date().toISOString(), fx, stocks });
   } catch (e) {
