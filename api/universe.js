@@ -71,6 +71,7 @@ function toStock(r, fx) {
     desc: r.descr || "",
     descLong: r.descr_long || "",
     segments: r.segments || [["Total revenue", 1.0]],
+    opex: r.opex || null,
     own: r.ownership || { Institutional: 50, Insiders: 5, Public: 45 },
     peers: r.peers || [],
     phase: r.phase || undefined,
