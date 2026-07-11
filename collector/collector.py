@@ -73,6 +73,19 @@ SECTOR_FALLBACK_PE = {  # rough industry medians, used when peers are thin
 
 COUNTRY_FLAG = {"USD": "🇺🇸 US", "BRL": "🇧🇷 Brazil", "EUR": "🇪🇺 EU", "SEK": "🇸🇪 Sweden", "ILS": "🇮🇱 Israel"}
 
+# rates: units of currency per 1 USD (fetched once per run; fallbacks if API down)
+RATES = {"USD": 1.0, "BRL": 5.45, "EUR": 0.92, "SEK": 10.5, "ILS": 3.65, "ARS": 1300.0}
+
+def load_usd_rates():
+    try:
+        r = requests.get("https://open.er-api.com/v6/latest/USD", timeout=20)
+        data = r.json().get("rates", {})
+        for c, v in data.items():
+            RATES[c] = float(v)
+        print(f"  live FX loaded ({len(data)} currencies)")
+    except Exception as e:
+        print(f"  live FX failed ({e}); using fallbacks")
+
 
 # ---------------------------------------------------------------------------
 # helpers
@@ -225,6 +238,17 @@ def collect_instrument(conn, ticker, currency, kind):
     revenue_m = num(info.get("totalRevenue"), scale=1e-6)  # → millions
     ebitda_b = num(info.get("ebitda"), scale=1e-9)
     div_ps = num(info.get("dividendRate"), scale=px_scale) or 0.0
+    fwd_eps = num(info.get("forwardEps"), scale=px_scale)
+    target_mean = num(info.get("targetMeanPrice"), scale=px_scale)
+    target_high = num(info.get("targetHighPrice"), scale=px_scale)
+    target_low = num(info.get("targetLowPrice"), scale=px_scale)
+    try:
+        n_analysts = int(info.get("numberOfAnalystOpinions") or 0) or None
+    except (TypeError, ValueError):
+        n_analysts = None
+    recommendation = (info.get("recommendationKey") or None)
+    if recommendation in ("none", "NONE"):
+        recommendation = None
     expense_ratio = num(info.get("annualReportExpenseRatio"), scale=100) if kind == "etf" else None
 
     # ex-dividend date (epoch → readable)
@@ -234,6 +258,29 @@ def collect_instrument(conn, ticker, currency, kind):
             ex_div = dt.datetime.utcfromtimestamp(info["exDividendDate"]).strftime("%b %d, %Y")
         except Exception:
             ex_div = None
+
+    # Yahoo may report FINANCIAL STATEMENTS in a different currency than the
+    # listing (e.g. GGAL: price in USD, statements in ARS). Convert statements
+    # into the listing currency so revenue/market-cap ratios make sense.
+    fin_ccy = (info.get("financialCurrency") or currency).upper()
+    conv = 1.0
+    if fin_ccy != currency and fin_ccy in RATES and currency in RATES:
+        conv = RATES[currency] / RATES[fin_ccy]
+        print(f"  statements in {fin_ccy} -> converting to {currency} (x{conv:.6f})")
+    if conv != 1.0:
+        if revenue_m is not None: revenue_m = round(revenue_m * conv, 1)
+        if ebitda_b is not None: ebitda_b = round(ebitda_b * conv, 3)
+
+    # analyst consensus (free from Yahoo): price targets + recommendation
+    target_mean = num(info.get("targetMeanPrice"))
+    target_high = num(info.get("targetHighPrice"))
+    target_low = num(info.get("targetLowPrice"))
+    rec_key = info.get("recommendationKey")
+    analysts_n = info.get("numberOfAnalystOpinions")
+    try:
+        analysts_n = int(analysts_n) if analysts_n is not None else None
+    except (TypeError, ValueError):
+        analysts_n = None
 
     forecast_g = eps_growth if eps_growth is not None else rev_growth
     peg = calc_peg(pe, eps_growth)
@@ -265,6 +312,32 @@ def collect_instrument(conn, ticker, currency, kind):
     except Exception as e:
         print(f"  balance sheet parse failed: {e}")
 
+    # real cost structure from the latest annual income statement (free!)
+    opex = None
+    try:
+        fin0 = tk.financials
+        if fin0 is not None and not fin0.empty:
+            col0 = fin0.columns[0]
+            def m(field):
+                try:
+                    return num(fin0.loc[field, col0], scale=1e-6, nd=0)
+                except Exception:
+                    return None
+            opex = {
+                "fy": int(col0.year),
+                "rev": m("Total Revenue"),
+                "cor": m("Cost Of Revenue"),
+                "gp": m("Gross Profit"),
+                "sgna": m("Selling General And Administration"),
+                "rnd": m("Research And Development"),
+                "opx": m("Operating Expense"),
+                "ni": m("Net Income"),
+            }
+            if not opex.get("rev"):
+                opex = None
+    except Exception:
+        opex = None
+
     # interest coverage (EBIT / interest expense) when available
     coverage = None
     try:
@@ -278,6 +351,30 @@ def collect_instrument(conn, ticker, currency, kind):
     except Exception:
         pass
 
+    # real expense breakdown from the income statement (converted to listing ccy)
+    opex = None
+    try:
+        fin2 = tk.financials
+        if fin2 is not None and not fin2.empty:
+            c0 = fin2.columns[0]
+            def li(name):
+                try:
+                    return float(fin2.loc[name, c0])
+                except Exception:
+                    return None
+            mm = 1e-6 * conv
+            opex = {
+                "cos": num(li("Cost Of Revenue"), mm, 0),
+                "rnd": num(li("Research And Development"), mm, 0),
+                "sga": num(li("Selling General And Administration"), mm, 0),
+                "tax": num(li("Tax Provision"), mm, 0),
+                "interest": num(li("Interest Expense"), mm, 0),
+            }
+            if all(v is None for v in opex.values()):
+                opex = None
+    except Exception:
+        opex = None
+
     # ROIC proxy: net income / (equity + debt)
     roic = None
     if net_margin is not None and revenue_m and bs.get("equity"):
@@ -285,6 +382,11 @@ def collect_instrument(conn, ticker, currency, kind):
         invested = (bs.get("equity") or 0) + (bs.get("debt") or 0)
         if invested > 0:
             roic = round(ni / invested * 100, 1)
+
+    if conv != 1.0:
+        for kk in list(bs.keys()):
+            if bs.get(kk) is not None:
+                bs[kk] = round(bs[kk] * conv, 3)
 
     descr = (info.get("longBusinessSummary") or "")[:240]
     descr_long = info.get("longBusinessSummary") or ""
@@ -312,13 +414,19 @@ def collect_instrument(conn, ticker, currency, kind):
         "total_liab": bs.get("total_liab"), "total_assets": bs.get("total_assets"),
         "equity": bs.get("equity"), "coverage": coverage, "recv": bs.get("recv"),
         "inv": bs.get("inv"), "phys": bs.get("phys"), "ap": bs.get("ap"),
+        "target_mean": target_mean, "target_high": target_high, "target_low": target_low,
+        "rec_key": rec_key, "analysts_n": analysts_n, "fin_currency": fin_ccy,
         "descr": descr, "descr_long": descr_long,
+        "opex": json.dumps(opex) if opex else None,
+        "forward_eps": fwd_eps, "target_mean": target_mean, "target_high": target_high,
+        "target_low": target_low, "n_analysts": n_analysts, "recommendation": recommendation,
         "segments": json.dumps(segments), "ownership": json.dumps(ownership),
         "peers": json.dumps([]), "phase": None,
+        "opex": json.dumps(opex) if opex else None,
     }
     upsert_instrument(conn, row)
     collect_prices(conn, tk, ticker, px_scale)
-    collect_financials(conn, tk, ticker)
+    collect_financials(conn, tk, ticker, conv)
     if currency == "USD":
         collect_insiders(conn, ticker)
     print(f"  ✓ {ticker} done")
@@ -350,6 +458,14 @@ def collect_prices(conn, tk, ticker, px_scale=1.0, years=5):
         if attempt < 3:
             print(f"  empty history (try {attempt}) — Yahoo throttling? retrying in 15s")
             time.sleep(15)
+    if (hist is None or hist.empty or len(hist) < 200) and years != "max":
+        try:
+            h2 = tk.history(period="max", interval="1d", auto_adjust=True)
+            if h2 is not None and (hist is None or len(h2) > (0 if hist is None else len(hist))):
+                hist = h2
+                print(f"  thin 5y history — using period=max ({len(hist)} rows)")
+        except Exception:
+            pass
     if hist is None or hist.empty:
         print("  no price history after retries — keeping previous prices in DB")
         return
@@ -368,7 +484,7 @@ def collect_prices(conn, tk, ticker, px_scale=1.0, years=5):
     print(f"  {len(rows)} price rows")
 
 
-def collect_financials(conn, tk, ticker):
+def collect_financials(conn, tk, ticker, conv=1.0):
     try:
         fin = tk.financials              # annual income statement
         cf = tk.cashflow
@@ -385,7 +501,7 @@ def collect_financials(conn, tk, ticker):
                     fcf = cf.loc["Free Cash Flow", col]
             except Exception:
                 pass
-            rows.append((ticker, year, num(rev, 1e-6, 0), num(earn, 1e-6, 0), num(fcf, 1e-6, 0)))
+            rows.append((ticker, year, num(rev, 1e-6 * conv, 0), num(earn, 1e-6 * conv, 0), num(fcf, 1e-6 * conv, 0)))
         with conn.cursor() as cur:
             psycopg2.extras.execute_values(
                 cur,
@@ -403,19 +519,24 @@ def collect_financials(conn, tk, ticker):
 # ---------------------------------------------------------------------------
 # SEC EDGAR — insider Form 4 (US only, free, official)
 # ---------------------------------------------------------------------------
+_CIK_MAP = None
+
 def collect_insiders(conn, ticker):
+    global _CIK_MAP
     ua = os.environ.get("SEC_UA", "tenbagger demo contact@example.com")
     headers = {"User-Agent": ua}
     try:
-        # map ticker → CIK
-        m = requests.get("https://www.sec.gov/files/company_tickers.json",
-                         headers=headers, timeout=20).json()
+        if _CIK_MAP is None:
+            _CIK_MAP = requests.get("https://www.sec.gov/files/company_tickers.json",
+                                    headers=headers, timeout=20).json()
+            print(f"  SEC CIK map loaded ({len(_CIK_MAP)} companies)")
         cik = None
-        for v in m.values():
+        for v in _CIK_MAP.values():
             if v["ticker"].upper() == ticker.upper():
                 cik = str(v["cik_str"]).zfill(10)
                 break
         if not cik:
+            print(f"  {ticker}: not in SEC map (insiders skipped)")
             return
         # recent filings
         subs = requests.get(f"https://data.sec.gov/submissions/CIK{cik}.json",
@@ -423,12 +544,47 @@ def collect_insiders(conn, ticker):
         recent = subs.get("filings", {}).get("recent", {})
         forms = recent.get("form", [])
         dates = recent.get("filingDate", [])
-        # We only count Form 4 occurrences here as a lightweight signal.
-        # (Parsing each Form 4 XML for exact share counts is possible but
-        #  heavier; this keeps the free job fast. Swap in full parsing later.)
+        accs = recent.get("accessionNumber", [])
+        docs = recent.get("primaryDocument", [])
+        # Parse each recent Form 4 XML for real direction (buy/sell), shares & price.
+        import xml.etree.ElementTree as ET
         tx = []
-        for form, date in list(zip(forms, dates))[:40]:
-            if form == "4":
+        parsed = 0
+        for form, date, acc, doc in list(zip(forms, dates, accs, docs))[:40]:
+            if form != "4" or parsed >= 8:
+                continue
+            try:
+                fname = (doc or "").split("/")[-1]
+                if not fname.endswith(".xml"):
+                    tx.append((ticker, date, "Insider (Form 4)", "—", None, None, None, None))
+                    continue
+                url = f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{acc.replace('-', '')}/{fname}"
+                xml_txt = requests.get(url, headers=headers, timeout=20).text
+                root = ET.fromstring(xml_txt)
+                name = (root.findtext(".//rptOwnerName") or "Insider").title()
+                role = root.findtext(".//officerTitle") or (
+                    "Director" if (root.findtext(".//isDirector") or "0").strip() in ("1", "true") else "—")
+                buys = sells = buy_val = sell_val = 0.0
+                for tr in root.findall(".//nonDerivativeTransaction"):
+                    code = (tr.findtext(".//transactionCode") or "").strip()
+                    sh = float(tr.findtext(".//transactionShares/value") or 0)
+                    px = float(tr.findtext(".//transactionPricePerShare/value") or 0)
+                    if code == "P":
+                        buys += sh; buy_val += sh * px
+                    elif code == "S":
+                        sells += sh; sell_val += sh * px
+                if buys == 0 and sells == 0:
+                    # awards/exercises only — record neutrally
+                    tx.append((ticker, date, name, role, None, None, None, None))
+                else:
+                    is_buy = buys >= sells
+                    sh = buys if is_buy else sells
+                    val = buy_val if is_buy else sell_val
+                    price = round(val / sh, 2) if sh else None
+                    tx.append((ticker, date, name, role, is_buy, round(sh, 0), price, round(val, 0)))
+                parsed += 1
+                time.sleep(0.15)  # SEC politeness
+            except Exception:
                 tx.append((ticker, date, "Insider (Form 4)", "—", None, None, None, None))
         if tx:
             with conn.cursor() as cur:
@@ -451,6 +607,7 @@ def collect_insiders(conn, ticker):
 def main():
     conn = db()
     print("== tenbagger collector ==")
+    load_usd_rates()
     single = (os.environ.get("TICKER") or "").strip().upper()
     if single:
         # on-demand mode: collect just one ticker (triggered from the app)
