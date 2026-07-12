@@ -434,7 +434,7 @@ def collect_instrument(conn, ticker, currency, kind):
     collect_prices(conn, tk, ticker, px_scale)
     collect_financials(conn, tk, ticker, conv)
     if currency == "USD":
-        collect_insiders(conn, ticker)
+        collect_insiders(conn, tk, ticker)
     print(f"  ✓ {ticker} done")
 
 
@@ -525,87 +525,47 @@ def collect_financials(conn, tk, ticker, conv=1.0):
 # ---------------------------------------------------------------------------
 # SEC EDGAR — insider Form 4 (US only, free, official)
 # ---------------------------------------------------------------------------
-_CIK_MAP = None
-
-def collect_insiders(conn, ticker):
-    global _CIK_MAP
-    ua = os.environ.get("SEC_UA", "tenbagger demo contact@example.com")
-    headers = {"User-Agent": ua}
+def collect_insiders(conn, tk, ticker):
+    """Insider buys/sells from Yahoo (same channel as everything else).
+    Only rows with a clear direction are stored — grants/exercises are skipped."""
     try:
-        if _CIK_MAP is None:
-            _CIK_MAP = requests.get("https://www.sec.gov/files/company_tickers.json",
-                                    headers=headers, timeout=20).json()
-            print(f"  SEC CIK map loaded ({len(_CIK_MAP)} companies)")
-        cik = None
-        for v in _CIK_MAP.values():
-            if v["ticker"].upper() == ticker.upper():
-                cik = str(v["cik_str"]).zfill(10)
-                break
-        if not cik:
-            print(f"  {ticker}: not in SEC map (insiders skipped)")
-            return
-        # recent filings
-        subs = requests.get(f"https://data.sec.gov/submissions/CIK{cik}.json",
-                            headers=headers, timeout=20).json()
-        recent = subs.get("filings", {}).get("recent", {})
-        forms = recent.get("form", [])
-        dates = recent.get("filingDate", [])
-        accs = recent.get("accessionNumber", [])
-        docs = recent.get("primaryDocument", [])
-        # Parse each recent Form 4 XML for real direction (buy/sell), shares & price.
-        import xml.etree.ElementTree as ET
+        df = None
+        try:
+            df = tk.insider_transactions
+        except Exception:
+            df = None
         tx = []
-        parsed = 0
-        for form, date, acc, doc in list(zip(forms, dates, accs, docs))[:80]:
-            if form != "4" or parsed >= 15:
-                continue
-            try:
-                fname = (doc or "").split("/")[-1]
-                if not fname.endswith(".xml"):
-                    # primary doc is an HTML rendering — locate the raw XML via the folder index
-                    try:
-                        idx = requests.get(
-                            f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{acc.replace('-', '')}/index.json",
-                            headers=headers, timeout=20).json()
-                        cand = [it["name"] for it in idx.get("directory", {}).get("item", [])
-                                if it.get("name", "").endswith(".xml")]
-                        fname = cand[0] if cand else ""
-                    except Exception:
-                        fname = ""
-                if not fname:
-                    tx.append((ticker, date, "Insider (Form 4)", "—", None, None, None, None))
+        if df is not None and hasattr(df, "empty") and not df.empty:
+            for _, r in df.head(40).iterrows():
+                try:
+                    txt = f"{r.get('Text', '')} {r.get('Transaction', '')}".lower()
+                    if "purchase" in txt or "buy" in txt:
+                        is_buy = True
+                    elif "sale" in txt or "sell" in txt:
+                        is_buy = False
+                    else:
+                        continue  # grants, exercises, gifts: not a signal
+                    d = r.get("Start Date")
+                    filed = str(d)[:10]
+                    if not filed or filed in ("NaT", "None", "nan"):
+                        continue
+                    sh = r.get("Shares")
+                    val = r.get("Value")
+                    sh = float(sh) if sh is not None and sh == sh else None
+                    val = float(val) if val is not None and val == val else None
+                    price = round(val / sh, 2) if sh and val else None
+                    name = str(r.get("Insider") or "Insider").title()[:80]
+                    role = str(r.get("Position") or "—")[:60]
+                    tx.append((ticker, filed, name, role, is_buy,
+                               round(sh, 0) if sh else None, price,
+                               round(val, 0) if val else None))
+                    if len(tx) >= 14:
+                        break
+                except Exception:
                     continue
-                url = f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{acc.replace('-', '')}/{fname}"
-                xml_txt = requests.get(url, headers=headers, timeout=20).text
-                root = ET.fromstring(xml_txt)
-                name = (root.findtext(".//rptOwnerName") or "Insider").title()
-                role = root.findtext(".//officerTitle") or (
-                    "Director" if (root.findtext(".//isDirector") or "0").strip() in ("1", "true") else "—")
-                buys = sells = buy_val = sell_val = 0.0
-                for tr in (root.findall(".//nonDerivativeTransaction") + root.findall(".//derivativeTransaction")):
-                    code = (tr.findtext(".//transactionCode") or "").strip()
-                    sh = float(tr.findtext(".//transactionShares/value") or 0)
-                    px = float(tr.findtext(".//transactionPricePerShare/value") or 0)
-                    if code == "P":
-                        buys += sh; buy_val += sh * px
-                    elif code == "S":
-                        sells += sh; sell_val += sh * px
-                if buys == 0 and sells == 0:
-                    # awards/exercises only — record neutrally
-                    tx.append((ticker, date, name, role, None, None, None, None))
-                else:
-                    is_buy = buys >= sells
-                    sh = buys if is_buy else sells
-                    val = buy_val if is_buy else sell_val
-                    price = round(val / sh, 2) if sh else None
-                    tx.append((ticker, date, name, role, is_buy, round(sh, 0), price, round(val, 0)))
-                parsed += 1
-                time.sleep(0.15)  # SEC politeness
-            except Exception:
-                tx.append((ticker, date, "Insider (Form 4)", "—", None, None, None, None))
-        if tx:
-            with conn.cursor() as cur:
-                cur.execute("delete from insider_tx where ticker = %s", (ticker,))
+        with conn.cursor() as cur:
+            cur.execute("delete from insider_tx where ticker = %s", (ticker,))
+            if tx:
                 psycopg2.extras.execute_values(
                     cur,
                     """insert into insider_tx
@@ -613,11 +573,11 @@ def collect_insiders(conn, ticker):
                        values %s""",
                     tx,
                 )
-            conn.commit()
-            print(f"  {len(tx)} insider Form-4 filings")
-        time.sleep(0.2)  # be polite to SEC
+        conn.commit()
+        print(f"  {len(tx)} insider buy/sell rows (Yahoo)")
     except Exception as e:
-        print(f"  insider fetch failed: {e}")
+        conn.rollback()
+        print(f"  insiders failed: {e}")
 
 
 # ---------------------------------------------------------------------------
