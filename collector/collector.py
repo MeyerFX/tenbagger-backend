@@ -219,6 +219,8 @@ def collect_instrument(conn, ticker, currency, kind):
 
     name = info.get("longName") or info.get("shortName") or ticker
     sector = info.get("sector") or ("Diversified fund" if kind == "etf" else None)
+    industry = info.get("industry")
+    industry = info.get("industry")
 
     mkt_cap_local = num(info.get("marketCap"), scale=1e-9)  # → billions
     pe = num(info.get("trailingPE"))
@@ -357,18 +359,22 @@ def collect_instrument(conn, ticker, currency, kind):
         fin2 = tk.financials
         if fin2 is not None and not fin2.empty:
             c0 = fin2.columns[0]
-            def li(name):
-                try:
-                    return float(fin2.loc[name, c0])
-                except Exception:
-                    return None
+            def li(*names):
+                for nm in names:
+                    try:
+                        v = float(fin2.loc[nm, c0])
+                        if v == v:  # not NaN
+                            return v
+                    except Exception:
+                        continue
+                return None
             mm = 1e-6 * conv
             opex = {
-                "cos": num(li("Cost Of Revenue"), mm, 0),
-                "rnd": num(li("Research And Development"), mm, 0),
-                "sga": num(li("Selling General And Administration"), mm, 0),
-                "tax": num(li("Tax Provision"), mm, 0),
-                "interest": num(li("Interest Expense"), mm, 0),
+                "cos": num(li("Cost Of Revenue", "Reconciled Cost Of Revenue"), mm, 0),
+                "rnd": num(li("Research And Development", "Research & Development"), mm, 0),
+                "sga": num(li("Selling General And Administration", "Selling General Administrative", "Selling General & Administrative"), mm, 0),
+                "tax": num(li("Tax Provision", "Income Tax Expense"), mm, 0),
+                "interest": num(li("Interest Expense", "Interest Expense Non Operating"), mm, 0),
             }
             if all(v is None for v in opex.values()):
                 opex = None
@@ -402,7 +408,7 @@ def collect_instrument(conn, ticker, currency, kind):
     ownership = {"Institutional": inst, "Insiders": ins, "Public": public}
 
     row = {
-        "ticker": ticker, "name": name, "sector": sector,
+        "ticker": ticker, "name": name, "sector": sector, "industry": industry, "industry": industry,
         "country": COUNTRY_FLAG.get(currency, "🌐"), "currency": currency, "kind": kind,
         "mkt_cap": mkt_cap_local, "pe": pe, "fwd_pe": fwd_pe, "ps": ps, "pb": pb,
         "ev_ebitda": ev_ebitda, "peg": peg, "eps_growth": eps_growth, "rev_growth": rev_growth,
@@ -550,12 +556,23 @@ def collect_insiders(conn, ticker):
         import xml.etree.ElementTree as ET
         tx = []
         parsed = 0
-        for form, date, acc, doc in list(zip(forms, dates, accs, docs))[:40]:
-            if form != "4" or parsed >= 8:
+        for form, date, acc, doc in list(zip(forms, dates, accs, docs))[:80]:
+            if form != "4" or parsed >= 15:
                 continue
             try:
                 fname = (doc or "").split("/")[-1]
                 if not fname.endswith(".xml"):
+                    # primary doc is an HTML rendering — locate the raw XML via the folder index
+                    try:
+                        idx = requests.get(
+                            f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{acc.replace('-', '')}/index.json",
+                            headers=headers, timeout=20).json()
+                        cand = [it["name"] for it in idx.get("directory", {}).get("item", [])
+                                if it.get("name", "").endswith(".xml")]
+                        fname = cand[0] if cand else ""
+                    except Exception:
+                        fname = ""
+                if not fname:
                     tx.append((ticker, date, "Insider (Form 4)", "—", None, None, None, None))
                     continue
                 url = f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{acc.replace('-', '')}/{fname}"
@@ -565,7 +582,7 @@ def collect_insiders(conn, ticker):
                 role = root.findtext(".//officerTitle") or (
                     "Director" if (root.findtext(".//isDirector") or "0").strip() in ("1", "true") else "—")
                 buys = sells = buy_val = sell_val = 0.0
-                for tr in root.findall(".//nonDerivativeTransaction"):
+                for tr in (root.findall(".//nonDerivativeTransaction") + root.findall(".//derivativeTransaction")):
                     code = (tr.findtext(".//transactionCode") or "").strip()
                     sh = float(tr.findtext(".//transactionShares/value") or 0)
                     px = float(tr.findtext(".//transactionPricePerShare/value") or 0)
