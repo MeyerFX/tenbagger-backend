@@ -593,12 +593,15 @@ def main():
     else:
         universe = load_universe(conn)
     print(f"  universe: {len(universe)} tickers")
+    ok, failed = 0, []
     for ticker, currency, kind in universe:
         try:
             collect_instrument(conn, ticker, currency, kind)
+            ok += 1
             time.sleep(2.5)  # gentle pacing for Yahoo (CI runners get throttled)
         except Exception as e:
             print(f"!! {ticker} failed: {e}")
+            failed.append(ticker)
             conn.rollback()
     fetch_fx(conn)  # after collection, so auto-detected currencies are included
     conn.close()
@@ -609,6 +612,14 @@ def main():
         alerts_mod.main()
     except Exception as e:
         print(f"alerts step failed: {e}")
+
+    # ---- loud summary: a run that writes nothing must turn the job RED ----
+    print("== summary ==")
+    print(f"  collected ok: {ok}   failed: {len(failed)}" + (f"  -> {', '.join(failed[:12])}" if failed else ""))
+    if ok == 0 and len(universe) > 0:
+        print("!! NOTHING was written to the database — failing the job so it shows RED.")
+        print("!! Most common cause: a missing column (run the latest upgrade SQL in Supabase).")
+        raise SystemExit(1)
     print("== done ==")
 
 
