@@ -28,6 +28,8 @@ function toStock(r, fx) {
     ticker: r.ticker,
     name: r.name,
     sector: r.sector,
+    industry: r.industry || null,
+    industry: r.industry || null,
     country: r.country,
     currency: r.currency,
     kind: r.kind || undefined,
