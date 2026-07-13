@@ -22,13 +22,22 @@ async function sb(path) {
   return r.json();
 }
 
+// strip NaN/Infinity that Postgres may serialize as the string "NaN"
+function cleanNums(o) {
+  for (const k in o) {
+    const v = o[k];
+    if (v === "NaN" || v === "Infinity" || v === "-Infinity") o[k] = null;
+    else if (typeof v === "number" && !Number.isFinite(v)) o[k] = null;
+  }
+  return o;
+}
+
 // map a DB row → the object shape the front-end's STOCKS array uses
 function toStock(r, fx) {
-  return {
+  return cleanNums({
     ticker: r.ticker,
     name: r.name,
     sector: r.sector,
-    industry: r.industry || null,
     industry: r.industry || null,
     country: r.country,
     currency: r.currency,
@@ -79,7 +88,7 @@ function toStock(r, fx) {
     phase: r.phase || undefined,
     // FX so the client can convert local → USD
     _perUSD: fx[r.currency] ?? 1,
-  };
+  });
 }
 
 export default async function handler(req, res) {
