@@ -426,6 +426,11 @@ def collect_instrument(conn, ticker, currency, kind):
         "segments": json.dumps(segments), "ownership": json.dumps(ownership),
         "peers": json.dumps([]), "phase": None,
     }
+    # safety net: manual computations (coverage, ROIC, balance-sheet math on
+    # pandas values) can produce NaN/inf that num() never saw — never store them
+    for k, v in list(row.items()):
+        if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+            row[k] = None
     upsert_instrument(conn, row)
     collect_prices(conn, tk, ticker, px_scale)
     collect_financials(conn, tk, ticker, conv)
