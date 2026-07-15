@@ -479,12 +479,16 @@ def collect_prices(conn, tk, ticker, px_scale=1.0, years=5):
     rows = []
     for idx, r in hist.iterrows():
         d = idx.date()
-        rows.append((ticker, d, num(r["Close"], scale=px_scale), num(r.get("Volume"), nd=0)))
+        rows.append((
+            ticker, d,
+            num(r["Close"], scale=px_scale), num(r.get("Volume"), nd=0),
+            num(r.get("High"), scale=px_scale), num(r.get("Low"), scale=px_scale),
+        ))
     with conn.cursor() as cur:
         cur.execute("delete from prices where ticker = %s", (ticker,))
         psycopg2.extras.execute_values(
             cur,
-            "insert into prices (ticker, d, close, volume) values %s on conflict do nothing",
+            "insert into prices (ticker, d, close, volume, high, low) values %s on conflict do nothing",
             rows, page_size=500,
         )
     conn.commit()
