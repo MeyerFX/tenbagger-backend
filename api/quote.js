@@ -48,6 +48,8 @@ export default async function handler(req, res) {
     const q = result.indicators?.quote?.[0] || {};
     const closes = q.close || [];
     const vols = q.volume || [];
+    const highs = q.high || [];
+    const lows = q.low || [];
 
     const candles = [];
     for (let i = 0; i < ts.length; i++) {
@@ -58,6 +60,8 @@ export default async function handler(req, res) {
         d: new Date(ts[i] * 1000).toISOString().slice(0, 10),
         close: +(c * scale).toFixed(4),
         volume: vols[i] == null ? null : Math.round(vols[i]),
+        high: highs[i] == null || !isFinite(highs[i]) ? null : +(highs[i] * scale).toFixed(4),
+        low: lows[i] == null || !isFinite(lows[i]) ? null : +(lows[i] * scale).toFixed(4),
       });
     }
     if (candles.length === 0) throw new Error("empty candles");
@@ -65,7 +69,7 @@ export default async function handler(req, res) {
     // fire-and-forget persistence, so the next full page load (and other
     // users) also see the fresh close — only when the service key exists
     if (SUPABASE_URL && SERVICE_KEY) {
-      const rows = candles.map((c) => ({ ticker: raw, d: c.d, close: c.close, volume: c.volume }));
+      const rows = candles.map((c) => ({ ticker: raw, d: c.d, close: c.close, volume: c.volume, high: c.high, low: c.low }));
       fetch(`${SUPABASE_URL}/rest/v1/prices?on_conflict=ticker,d`, {
         method: "POST",
         headers: {
