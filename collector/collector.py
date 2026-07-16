@@ -304,22 +304,46 @@ def collect_instrument(conn, ticker, currency, kind):
     #   1) eps_growth  — last quarter YoY (the old, fragile source)
     #   2) rev_growth  — revenue is immune to one-off charges/impairments
     #   3) implied_g   — analyst forward EPS vs trailing EPS (forward-looking)
+    # PRIMARY source: analyst earnings estimates for this year vs next year.
+    # These are on a NORMALIZED base — an impairment that wrecks the trailing
+    # quarter (and therefore eps_growth, implied_g and even trailing P/E ratios)
+    # doesn't touch them. Only if unavailable do we fall back to the median blend.
+    est_g = None
+    try:
+        est = tk.earnings_estimate  # DataFrame indexed by 0q/+1q/0y/+1y with an 'avg' column
+        e0, e1 = est.loc["0y", "avg"], est.loc["+1y", "avg"]
+        if e0 and e1 and float(e0) > 0:
+            est_g = round((float(e1) / float(e0) - 1.0) * 100.0, 1)
+    except Exception:
+        pass
+    if est_g is None:
+        try:
+            ge = tk.growth_estimates  # fallback shape in some yfinance versions
+            v = ge.loc["+1y"].iloc[0]
+            if v is not None and not (isinstance(v, float) and math.isnan(v)):
+                v = float(v)
+                est_g = round(v * 100.0, 1) if abs(v) <= 2 else round(v, 1)
+        except Exception:
+            pass
+
     _teps = num(info.get("trailingEps"), scale=px_scale)
     implied_g = None
     if fwd_eps and _teps and _teps > 0 and fwd_eps > 0:
         implied_g = round((fwd_eps / _teps - 1.0) * 100.0, 1)
-    _cands = sorted(g for g in (eps_growth, rev_growth, implied_g) if g is not None)
-    if _cands:
-        _mid = len(_cands) // 2
-        forecast_g = _cands[_mid] if len(_cands) % 2 == 1 else round((_cands[_mid - 1] + _cands[_mid]) / 2.0, 1)
-        # 3×revenue cap: when trailing EPS is impairment-depressed, even the
-        # analyst-implied number inflates and the median can still come out huge.
-        # Earnings can't sustainably outgrow revenue by big multiples.
-        if rev_growth is not None and rev_growth >= 0 and forecast_g > 40:
-            forecast_g = min(forecast_g, max(3.0 * rev_growth, 15.0))
-        forecast_g = max(-30.0, min(80.0, forecast_g))
+    if est_g is not None:
+        forecast_g = max(-30.0, min(80.0, est_g))
     else:
-        forecast_g = None
+        _cands = sorted(g for g in (eps_growth, rev_growth, implied_g) if g is not None)
+        if _cands:
+            _mid = len(_cands) // 2
+            forecast_g = _cands[_mid] if len(_cands) % 2 == 1 else round((_cands[_mid - 1] + _cands[_mid]) / 2.0, 1)
+            # 3×revenue cap: when trailing EPS is impairment-depressed, even the
+            # analyst-implied number inflates and the median can still come out huge.
+            if rev_growth is not None and rev_growth >= 0 and forecast_g > 40:
+                forecast_g = min(forecast_g, max(3.0 * rev_growth, 5.0))
+            forecast_g = max(-30.0, min(80.0, forecast_g))
+        else:
+            forecast_g = None
     peg = calc_peg(pe, forecast_g)
     sector_pe = SECTOR_FALLBACK_PE.get(sector, 18)
     sector_ps = round(sector_pe / 12, 1)
