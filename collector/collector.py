@@ -312,6 +312,11 @@ def collect_instrument(conn, ticker, currency, kind):
     if _cands:
         _mid = len(_cands) // 2
         forecast_g = _cands[_mid] if len(_cands) % 2 == 1 else round((_cands[_mid - 1] + _cands[_mid]) / 2.0, 1)
+        # 3×revenue cap: when trailing EPS is impairment-depressed, even the
+        # analyst-implied number inflates and the median can still come out huge.
+        # Earnings can't sustainably outgrow revenue by big multiples.
+        if rev_growth is not None and rev_growth >= 0 and forecast_g > 40:
+            forecast_g = min(forecast_g, max(3.0 * rev_growth, 15.0))
         forecast_g = max(-30.0, min(80.0, forecast_g))
     else:
         forecast_g = None
