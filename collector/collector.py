@@ -229,8 +229,22 @@ def collect_instrument(conn, ticker, currency, kind):
     ev_ebitda = num(info.get("enterpriseToEbitda"))
     eps_growth = num(info.get("earningsGrowth"), scale=100)
     rev_growth = num(info.get("revenueGrowth"), scale=100)
-    div_yield = num(info.get("dividendYield"), scale=100) or 0.0
+    # dividend yield: newer yfinance returns dividendYield already in percentage
+    # points (2.4 = 2.4%), older versions returned a fraction (0.024). The old
+    # blind ×100 turned every payer into a 100%+ yield → score 6 for all of them.
+    # Compute deterministically from dividendRate ($/share) ÷ price instead.
+    _dr = num(info.get("dividendRate"))
+    _px = num(info.get("currentPrice")) or num(info.get("regularMarketPrice"))
+    if _dr and _px and _px > 0:
+        div_yield = round(_dr / _px * 100.0, 2)
+    else:
+        _dy = num(info.get("dividendYield"), nd=6) or 0.0
+        div_yield = round(_dy * 100.0, 2) if _dy <= 1 else round(_dy, 2)
+    if div_yield and div_yield > 30:   # sanity net: nothing here yields >30%
+        div_yield = round(div_yield / 100.0, 2)
     payout = num(info.get("payoutRatio"), scale=100) or 0.0
+    if payout > 300:                   # same version drift guard for payout
+        payout = round(payout / 100.0, 2)
     debt_eq = num(info.get("debtToEquity"), scale=0.01)  # yahoo gives % → ratio
     roe = num(info.get("returnOnEquity"), scale=100)
     roa = num(info.get("returnOnAssets"), scale=100)
