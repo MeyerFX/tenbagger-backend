@@ -27,12 +27,15 @@ export default async function handler(req, res) {
     return;
   }
 
+  // range=5d (default) refreshes the last close; range=max bootstraps the FULL
+  // history for tickers the daily collector hasn't reached yet (new searches).
+  const RANGES = new Set(["5d", "1mo", "1y", "5y", "max"]);
+  const range = RANGES.has(String(req.query.range || "")) ? String(req.query.range) : "5d";
+
   try {
-    // 5 trading days, daily candles — enough to update the last close and
-    // append a new session, without re-downloading the whole history.
     const url =
       `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(raw)}` +
-      `?range=5d&interval=1d&includePrePost=false`;
+      `?range=${range}&interval=1d&includePrePost=false`;
     const r = await fetch(url, { headers: { "User-Agent": UA, Accept: "application/json" } });
     if (!r.ok) throw new Error(`yahoo ${r.status}`);
     const j = await r.json();
@@ -70,19 +73,20 @@ export default async function handler(req, res) {
     // users) also see the fresh close — only when the service key exists
     if (SUPABASE_URL && SERVICE_KEY) {
       const rows = candles.map((c) => ({ ticker: raw, d: c.d, close: c.close, volume: c.volume, high: c.high, low: c.low }));
-      fetch(`${SUPABASE_URL}/rest/v1/prices?on_conflict=ticker,d`, {
-        method: "POST",
-        headers: {
-          apikey: SERVICE_KEY,
-          Authorization: `Bearer ${SERVICE_KEY}`,
-          "Content-Type": "application/json",
-          Prefer: "resolution=merge-duplicates,return=minimal",
-        },
-        body: JSON.stringify(rows),
-      }).catch(() => {});
+      const hdrs = {
+        apikey: SERVICE_KEY,
+        Authorization: `Bearer ${SERVICE_KEY}`,
+        "Content-Type": "application/json",
+        Prefer: "resolution=merge-duplicates,return=minimal",
+      };
+      for (let i = 0; i < rows.length; i += 500) {
+        fetch(`${SUPABASE_URL}/rest/v1/prices?on_conflict=ticker,d`, {
+          method: "POST", headers: hdrs, body: JSON.stringify(rows.slice(i, i + 500)),
+        }).catch(() => {});
+      }
     }
 
-    res.setHeader("Cache-Control", "s-maxage=60, stale-while-revalidate=30"); // 1-min shared cache = natural rate limit
+    res.setHeader("Cache-Control", range === "5d" ? "s-maxage=60, stale-while-revalidate=30" : "s-maxage=3600"); // 1-min cache on refresh; 1h on backfills
     res.status(200).json({
       ticker: raw,
       currency,
