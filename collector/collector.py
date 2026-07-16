@@ -297,8 +297,25 @@ def collect_instrument(conn, ticker, currency, kind):
     except (TypeError, ValueError):
         analysts_n = None
 
-    forecast_g = eps_growth if eps_growth is not None else rev_growth
-    peg = calc_peg(pe, eps_growth)
+    # forecast growth: yfinance "earningsGrowth" is a SINGLE-QUARTER YoY figure —
+    # one impairment-distorted base quarter turns a mature company into a fake
+    # "fast grower" (PEP: +140% → PEG 0.13 → wrong Lynch class). Blend three
+    # independent estimates and take the MEDIAN so one bad input can't dominate:
+    #   1) eps_growth  — last quarter YoY (the old, fragile source)
+    #   2) rev_growth  — revenue is immune to one-off charges/impairments
+    #   3) implied_g   — analyst forward EPS vs trailing EPS (forward-looking)
+    _teps = num(info.get("trailingEps"), scale=px_scale)
+    implied_g = None
+    if fwd_eps and _teps and _teps > 0 and fwd_eps > 0:
+        implied_g = round((fwd_eps / _teps - 1.0) * 100.0, 1)
+    _cands = sorted(g for g in (eps_growth, rev_growth, implied_g) if g is not None)
+    if _cands:
+        _mid = len(_cands) // 2
+        forecast_g = _cands[_mid] if len(_cands) % 2 == 1 else round((_cands[_mid - 1] + _cands[_mid]) / 2.0, 1)
+        forecast_g = max(-30.0, min(80.0, forecast_g))
+    else:
+        forecast_g = None
+    peg = calc_peg(pe, forecast_g)
     sector_pe = SECTOR_FALLBACK_PE.get(sector, 18)
     sector_ps = round(sector_pe / 12, 1)
 
@@ -498,6 +515,35 @@ def collect_prices(conn, tk, ticker, px_scale=1.0, years=5):
             num(r["Close"], scale=px_scale), num(r.get("Volume"), nd=0),
             num(r.get("High"), scale=px_scale), num(r.get("Low"), scale=px_scale),
         ))
+
+    # --- unit-break healing (TASE): Yahoo sometimes switches a ticker's feed
+    # between agorot and shekels MID-history (e.g. real ILS only from May, agorot
+    # before), which a single global scale can't fix and which poisons SMA200 and
+    # the whole technical read. Walk backwards from the most recent close (the
+    # trusted unit); a ~100× jump between consecutive sessions is a feed switch,
+    # not a price move — fold the older segment onto the newer unit.
+    f = 1.0
+    for k in range(len(rows) - 2, -1, -1):
+        c_new = rows[k + 1][2]
+        c_old = rows[k][2]
+        if c_old is None or c_new is None or c_new <= 0:
+            continue
+        ratio = (c_old * f) / c_new
+        if ratio > 20:
+            f *= 0.01
+        elif ratio < 0.05:
+            f *= 100.0
+        if f != 1.0:
+            t_, d_, c_, v_, h_, l_ = rows[k]
+            rows[k] = (
+                t_, d_,
+                round(c_ * f, 4) if c_ is not None else None, v_,
+                round(h_ * f, 4) if h_ is not None else None,
+                round(l_ * f, 4) if l_ is not None else None,
+            )
+    if f != 1.0:
+        print(f"  {ticker}: unit break healed (older segment scaled by {f})")
+
     with conn.cursor() as cur:
         cur.execute("delete from prices where ticker = %s", (ticker,))
         psycopg2.extras.execute_values(
