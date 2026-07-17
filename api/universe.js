@@ -52,6 +52,7 @@ function toStock(r, fx) {
     epsGrowth: r.eps_growth ?? 0,
     revGrowth: r.rev_growth ?? 0,
     forecastG: r.forecast_g ?? 0,
+    estEpsG: r.est_eps_g ?? null,  // analyst FY+1 EPS growth — normalized base, immune to impairment noise
     divYield: r.div_yield ?? 0,
     payout: r.payout ?? 0,
     debtEq: r.debt_eq ?? 0,
