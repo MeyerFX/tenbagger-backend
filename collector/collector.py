@@ -318,16 +318,47 @@ def collect_instrument(conn, ticker, currency, kind):
         if revenue_m is not None: revenue_m = round(revenue_m * conv, 1)
         if ebitda_b is not None: ebitda_b = round(ebitda_b * conv, 3)
 
-    # analyst consensus (free from Yahoo): price targets + recommendation
-    target_mean = num(info.get("targetMeanPrice"))
-    target_high = num(info.get("targetHighPrice"))
-    target_low = num(info.get("targetLowPrice"))
+    # analyst consensus (free from Yahoo): price targets + recommendation.
+    # info fields first (WITH currency scale — the old second pass dropped it);
+    # newer yfinance moved these to dedicated endpoints, so fall back to
+    # tk.analyst_price_targets / tk.recommendations_summary when info is empty.
+    target_mean = num(info.get("targetMeanPrice"), scale=px_scale)
+    target_high = num(info.get("targetHighPrice"), scale=px_scale)
+    target_low = num(info.get("targetLowPrice"), scale=px_scale)
     rec_key = info.get("recommendationKey")
     analysts_n = info.get("numberOfAnalystOpinions")
     try:
         analysts_n = int(analysts_n) if analysts_n is not None else None
     except (TypeError, ValueError):
         analysts_n = None
+    if target_mean is None:
+        try:
+            apt = tk.analyst_price_targets or {}
+            target_mean = num(apt.get("mean"), scale=px_scale)
+            if target_high is None:
+                target_high = num(apt.get("high"), scale=px_scale)
+            if target_low is None:
+                target_low = num(apt.get("low"), scale=px_scale)
+        except Exception:
+            pass
+    if not rec_key or rec_key in ("none", "NONE"):
+        rec_key = None
+        try:
+            rs = tk.recommendations_summary
+            if rs is not None and not rs.empty:
+                row0 = rs.iloc[0]
+                votes = {
+                    "strong_buy": float(row0.get("strongBuy") or 0), "buy": float(row0.get("buy") or 0),
+                    "hold": float(row0.get("hold") or 0), "sell": float(row0.get("sell") or 0),
+                    "strong_sell": float(row0.get("strongSell") or 0),
+                }
+                tot = sum(votes.values())
+                if tot > 0:
+                    rec_key = max(votes, key=votes.get)
+                    if analysts_n is None:
+                        analysts_n = int(tot)
+        except Exception:
+            pass
 
     # forecast growth: yfinance "earningsGrowth" is a SINGLE-QUARTER YoY figure —
     # one impairment-distorted base quarter turns a mature company into a fake
