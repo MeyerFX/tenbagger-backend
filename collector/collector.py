@@ -229,6 +229,38 @@ def collect_instrument(conn, ticker, currency, kind):
     ev_ebitda = num(info.get("enterpriseToEbitda"))
     eps_growth = num(info.get("earningsGrowth"), scale=100)
     rev_growth = num(info.get("revenueGrowth"), scale=100)
+    # --- growth hygiene ------------------------------------------------------
+    # yfinance drifts these fields between versions (fraction 0.021 vs percent
+    # points 2.1) — the blind ×100 turns 2.1% revenue growth into 210% and
+    # poisons everything downstream (forecast, PEG, Lynch class, sanity caps).
+    # 1) drift guard on the info-based numbers:
+    if rev_growth is not None and abs(rev_growth) > 200:
+        rev_growth = round(rev_growth / 100.0, 1)
+    if eps_growth is not None and abs(eps_growth) > 500:
+        eps_growth = round(eps_growth / 100.0, 1)
+    # 2) prefer DETERMINISTIC growth computed from the actual annual statements
+    #    (revenue and net income, latest FY vs previous FY) — immune to drift:
+    try:
+        _f = tk.financials
+        if _f is not None and not _f.empty and _f.shape[1] >= 2:
+            _c0, _c1 = _f.columns[0], _f.columns[1]
+
+            def _fv(field, col):
+                try:
+                    v = float(_f.loc[field, col])
+                    return None if (math.isnan(v) or math.isinf(v)) else v
+                except Exception:
+                    return None
+
+            _r0, _r1 = _fv("Total Revenue", _c0), _fv("Total Revenue", _c1)
+            if _r0 is not None and _r1 and _r1 > 0:
+                rev_growth = round((_r0 / _r1 - 1.0) * 100.0, 1)
+            _n0, _n1 = _fv("Net Income", _c0), _fv("Net Income", _c1)
+            if _n0 is not None and _n1 is not None and _n0 > 0 and _n1 > 0:
+                eps_growth = round((_n0 / _n1 - 1.0) * 100.0, 1)
+    except Exception:
+        pass
+    # -------------------------------------------------------------------------
     # dividend yield: newer yfinance returns dividendYield already in percentage
     # points (2.4 = 2.4%), older versions returned a fraction (0.024). The old
     # blind ×100 turned every payer into a 100%+ yield → score 6 for all of them.
@@ -471,7 +503,7 @@ def collect_instrument(conn, ticker, currency, kind):
         "country": COUNTRY_FLAG.get(currency, "🌐"), "currency": currency, "kind": kind,
         "mkt_cap": mkt_cap_local, "pe": pe, "fwd_pe": fwd_pe, "ps": ps, "pb": pb,
         "ev_ebitda": ev_ebitda, "peg": peg, "eps_growth": eps_growth, "rev_growth": rev_growth,
-        "forecast_g": forecast_g, "div_yield": div_yield, "payout": payout, "debt_eq": debt_eq,
+        "forecast_g": forecast_g, "est_eps_g": est_g, "div_yield": div_yield, "payout": payout, "debt_eq": debt_eq,
         "roic": roic, "roe": roe, "roi": roa, "net_margin": net_margin, "gross_margin": gross_margin,
         "revenue_m": revenue_m, "ebitda_b": ebitda_b, "sector_pe": sector_pe, "sector_ps": sector_ps,
         "div_ps": div_ps, "ex_div": ex_div, "expense_ratio": expense_ratio,
