@@ -544,12 +544,31 @@ def collect_instrument(conn, ticker, currency, kind):
     # (MELI.BA-style cedears) is float-only garbage: a profitable company can't
     # be worth <5% of its own revenue. Recompute from local price × shares.
     if mkt_cap_local and revenue_m and revenue_m > 500 and mkt_cap_local < (revenue_m / 1000.0) * 0.05:
-        _sh = num(info.get("sharesOutstanding"), nd=0)
+        _sh = num(info.get("sharesOutstanding"), nd=0) or num(info.get("impliedSharesOutstanding"), nd=0)
         _pxn = num(info.get("currentPrice"), scale=px_scale) or num(info.get("regularMarketPrice"), scale=px_scale)
         _re = round(_sh * _pxn * 1e-9, 2) if _sh and _pxn else None
+        if _re is None:
+            try:  # thin listings often lack price/shares in `info` — fast_info has them
+                fi = tk.fast_info
+                _sh2 = num(getattr(fi, "shares", None), nd=0)
+                _px2 = num(getattr(fi, "last_price", None), scale=px_scale)
+                if _sh2 and _px2:
+                    _re = round(_sh2 * _px2 * 1e-9, 2)
+            except Exception:
+                pass
         if _re and _re > mkt_cap_local:
             print(f"  suspicious marketCap ({mkt_cap_local}B local < 5% of revenue) — recomputed from price×shares: {_re}B")
             mkt_cap_local = _re
+            # the P/E and P/S Yahoo reports for these listings inherit the same
+            # garbage — rebuild them from the fixed cap and actual LTM figures
+            if net_margin is not None and net_margin > 0 and revenue_m:
+                _ni_b = (net_margin / 100.0) * revenue_m / 1000.0
+                if _ni_b > 0:
+                    pe = round(mkt_cap_local / _ni_b, 1)
+            if revenue_m:
+                ps = round(mkt_cap_local / (revenue_m / 1000.0), 2)
+        else:
+            print(f"  suspicious marketCap ({mkt_cap_local}B local < 5% of revenue) — could not recompute (no price/shares in info or fast_info)")
 
     row = {
         "ticker": ticker, "name": name, "sector": sector, "industry": industry,
