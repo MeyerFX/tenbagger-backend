@@ -228,6 +228,17 @@ def collect_instrument(conn, ticker, currency, kind):
     industry = info.get("industry")
 
     mkt_cap_local = num(info.get("marketCap"), scale=1e-9)  # → billions
+    # sanity: Yahoo's marketCap for thin SECONDARY listings (MELI.BA-style ADRs/
+    # cedears) is often float-only garbage in local currency — a company can't be
+    # worth 5% of its own revenue while profitable. Recompute from price × shares.
+    _rev_b = num(info.get("totalRevenue"), scale=1e-9)
+    if mkt_cap_local and _rev_b and _rev_b > 1 and mkt_cap_local < _rev_b * 0.05:
+        _sh = num(info.get("sharesOutstanding"), nd=0)
+        _pxn = num(info.get("currentPrice")) or num(info.get("regularMarketPrice"))
+        _re = _sh and _pxn and round(_sh * _pxn * 1e-9, 2)
+        if _re and _re > mkt_cap_local:
+            print(f"  suspicious marketCap ({mkt_cap_local}B < 5% of revenue) — recomputed from price×shares: {_re}B")
+            mkt_cap_local = _re
     pe = num(info.get("trailingPE"))
     fwd_pe = num(info.get("forwardPE"))
     ps = num(info.get("priceToSalesTrailing12Months"))
@@ -516,6 +527,10 @@ def collect_instrument(conn, ticker, currency, kind):
         invested = (bs.get("equity") or 0) + (bs.get("debt") or 0)
         if invested > 0:
             roic = round(ni / invested * 100, 1)
+            # junk guard: secondary listings can carry a converted-currency equity
+            # near zero, producing ROIC like 15673% — no real business does that
+            if abs(roic) > 300:
+                roic = None
 
     if conv != 1.0:
         for kk in list(bs.keys()):
