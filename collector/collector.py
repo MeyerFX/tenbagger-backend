@@ -123,9 +123,15 @@ def load_universe(conn):
     try:
         with conn.cursor() as cur:
             cur.execute("select distinct ticker from user_watchlists")
-            rows = [r[0] for r in cur.fetchall()]
+            rows = {r[0] for r in cur.fetchall()}
+            # searched-but-unwatchlisted tickers live only in `instruments`;
+            # keep them fresh too, or they fossilize with whatever collector
+            # bugs existed the day they were first fetched (the PEP case:
+            # searched once, frozen forever with forecast_g = 137)
+            cur.execute("select ticker from instruments")
+            rows |= {r[0] for r in cur.fetchall()}
         if rows:
-            return [(t, None, None) for t in sorted(set(rows) | set(MAG7))]
+            return [(t, None, None) for t in sorted(rows | set(MAG7))]
         print("  user_watchlists empty — falling back to legacy watchlist (+ Mag 7)")
     except Exception as e:
         conn.rollback()
