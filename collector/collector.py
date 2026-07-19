@@ -573,13 +573,22 @@ def collect_instrument(conn, ticker, currency, kind):
                     _sh_any = num(float(_shf.iloc[-1]), nd=0)
             except Exception:
                 pass
+        _thresh = (revenue_m / 1000.0) * 0.05
         _re, _src = (round(_sh_any * _px_any * 1e-9, 2), "price×shares") if _sh_any and _px_any else (None, None)
-        if _re is None and "." in ticker:
-            try:  # cross-listed line: primary listing has the clean cap, in USD
+        # cedears/ADR wrappers: the LOCAL share count is the wrapper's float
+        # (~250k cedears for MELI.BA), so local price×shares just reproduces the
+        # same absurd number. If the recompute is still below the sanity
+        # threshold, the only true source is the PRIMARY listing's cap × FX.
+        if (_re is None or _re < _thresh) and "." in ticker:
+            try:
                 _cap_usd = num(getattr(yf.Ticker(ticker.split(".")[0]).fast_info, "market_cap", None), scale=1e-9)
                 _fx = (RATES.get(currency) or 0) / (RATES.get("USD") or 1)
                 if _cap_usd and _cap_usd > 1 and _fx > 0:
-                    _re, _src = round(_cap_usd * _fx, 2), f"primary listing {ticker.split('.')[0]} × FX"
+                    _cand = round(_cap_usd * _fx, 2)
+                    # identity/sanity bounds: must clear the threshold and imply P/S ≤ 50
+                    # (guards against the bare symbol resolving to a different company)
+                    if _cand >= _thresh and _cand <= (revenue_m / 1000.0) * 50:
+                        _re, _src = _cand, f"primary listing {ticker.split('.')[0]} × FX"
             except Exception:
                 pass
         if _re and _re > mkt_cap_local:
