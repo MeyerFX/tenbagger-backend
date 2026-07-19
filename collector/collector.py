@@ -544,20 +544,46 @@ def collect_instrument(conn, ticker, currency, kind):
     # (MELI.BA-style cedears) is float-only garbage: a profitable company can't
     # be worth <5% of its own revenue. Recompute from local price × shares.
     if mkt_cap_local and revenue_m and revenue_m > 500 and mkt_cap_local < (revenue_m / 1000.0) * 0.05:
-        _sh = num(info.get("sharesOutstanding"), nd=0) or num(info.get("impliedSharesOutstanding"), nd=0)
-        _pxn = num(info.get("currentPrice"), scale=px_scale) or num(info.get("regularMarketPrice"), scale=px_scale)
-        _re = round(_sh * _pxn * 1e-9, 2) if _sh and _pxn else None
-        if _re is None:
-            try:  # thin listings often lack price/shares in `info` — fast_info has them
+        # layered recompute — thin listings hide data in different places, so mix
+        # sources: price from info → fast_info → a 5d history probe; shares from
+        # info → fast_info → get_shares_full. Final fallback: the PRIMARY listing's
+        # clean USD market cap (MELI.BA → MELI) converted at the current FX rate.
+        _px_any = num(info.get("currentPrice"), scale=px_scale) or num(info.get("regularMarketPrice"), scale=px_scale)
+        _sh_any = num(info.get("sharesOutstanding"), nd=0) or num(info.get("impliedSharesOutstanding"), nd=0)
+        if _px_any is None or _sh_any is None:
+            try:
                 fi = tk.fast_info
-                _sh2 = num(getattr(fi, "shares", None), nd=0)
-                _px2 = num(getattr(fi, "last_price", None), scale=px_scale)
-                if _sh2 and _px2:
-                    _re = round(_sh2 * _px2 * 1e-9, 2)
+                if _px_any is None:
+                    _px_any = num(getattr(fi, "last_price", None), scale=px_scale)
+                if _sh_any is None:
+                    _sh_any = num(getattr(fi, "shares", None), nd=0)
+            except Exception:
+                pass
+        if _px_any is None:
+            try:
+                _h5 = tk.history(period="5d", interval="1d", auto_adjust=True)
+                if _h5 is not None and not _h5.empty:
+                    _px_any = num(float(_h5["Close"].iloc[-1]), scale=px_scale)
+            except Exception:
+                pass
+        if _sh_any is None:
+            try:
+                _shf = tk.get_shares_full(start="2024-01-01")
+                if _shf is not None and len(_shf) > 0:
+                    _sh_any = num(float(_shf.iloc[-1]), nd=0)
+            except Exception:
+                pass
+        _re, _src = (round(_sh_any * _px_any * 1e-9, 2), "price×shares") if _sh_any and _px_any else (None, None)
+        if _re is None and "." in ticker:
+            try:  # cross-listed line: primary listing has the clean cap, in USD
+                _cap_usd = num(getattr(yf.Ticker(ticker.split(".")[0]).fast_info, "market_cap", None), scale=1e-9)
+                _fx = (RATES.get(currency) or 0) / (RATES.get("USD") or 1)
+                if _cap_usd and _cap_usd > 1 and _fx > 0:
+                    _re, _src = round(_cap_usd * _fx, 2), f"primary listing {ticker.split('.')[0]} × FX"
             except Exception:
                 pass
         if _re and _re > mkt_cap_local:
-            print(f"  suspicious marketCap ({mkt_cap_local}B local < 5% of revenue) — recomputed from price×shares: {_re}B")
+            print(f"  suspicious marketCap ({mkt_cap_local}B local < 5% of revenue) — recomputed from {_src}: {_re}B")
             mkt_cap_local = _re
             # the P/E and P/S Yahoo reports for these listings inherit the same
             # garbage — rebuild them from the fixed cap and actual LTM figures
@@ -568,7 +594,7 @@ def collect_instrument(conn, ticker, currency, kind):
             if revenue_m:
                 ps = round(mkt_cap_local / (revenue_m / 1000.0), 2)
         else:
-            print(f"  suspicious marketCap ({mkt_cap_local}B local < 5% of revenue) — could not recompute (no price/shares in info or fast_info)")
+            print(f"  suspicious marketCap ({mkt_cap_local}B local < 5% of revenue) — could not recompute (px={_px_any is not None}, sh={_sh_any is not None})")
 
     row = {
         "ticker": ticker, "name": name, "sector": sector, "industry": industry,
