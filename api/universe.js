@@ -56,7 +56,7 @@ function toStock(r, fx) {
     divYield: r.div_yield ?? 0,
     payout: r.payout ?? 0,
     debtEq: r.debt_eq ?? 0,
-    roic: r.roic ?? 0,
+    roic: r.roic == null ? null : Number(r.roic),  // null = junk-guarded (secondary listings) → app shows n/a, not a fake 0%
     roe: r.roe ?? 0,
     roi: r.roi ?? 0,
     netMargin: r.net_margin ?? 0,
@@ -71,9 +71,7 @@ function toStock(r, fx) {
     totalLiab: r.total_liab ?? 0, totalAssets: r.total_assets ?? 0,
     equity: r.equity ?? 0, coverage: r.coverage ?? 5,
     recv: r.recv ?? 0, inv: r.inv ?? 0, phys: r.phys ?? 0, ap: r.ap ?? 0,
-    opex: r.opex || null,
     fwdEps: r.forward_eps,
-    targetMean: r.target_mean, targetHigh: r.target_high, targetLow: r.target_low,
     nAnalysts: r.n_analysts, recommendation: r.recommendation || null,
     targetMean: r.target_mean == null ? null : Number(r.target_mean),
     targetHigh: r.target_high == null ? null : Number(r.target_high),
